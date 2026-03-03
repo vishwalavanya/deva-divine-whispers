@@ -1,5 +1,4 @@
-const API_URL = "https://api.anthropic.com/v1/messages";
-const API_KEY = import.meta.env.VITE_ANTHROPIC_API_KEY || "";
+const API_URL = "https://dev-ai-1.onrender.com";
 
 export interface AIMessage {
   role: "user" | "assistant";
@@ -15,23 +14,35 @@ export async function callAnthropicAPI(
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      "x-api-key": API_KEY,
-      "anthropic-version": "2023-06-01",
     },
     body: JSON.stringify({
-      model: "claude-sonnet-4-20250514",
-      max_tokens: maxTokens,
       system: systemPrompt,
       messages,
+      max_tokens: maxTokens,
     }),
   });
 
-  const data = await response.json();
-  const reply = data.content
-    ?.filter((block: any) => block.type === "text")
-    .map((block: any) => block.text)
-    .join("\n");
+  if (!response.ok) {
+    throw new Error(`Backend error: ${response.status}`);
+  }
 
-  if (!reply) throw new Error("No response from AI");
-  return reply;
+  const data = await response.json();
+
+  // Support multiple response formats from the backend
+  if (typeof data === "string") return data;
+  if (data.reply) return data.reply;
+  if (data.response) return data.response;
+  if (data.message) return data.message;
+  if (data.content) {
+    if (typeof data.content === "string") return data.content;
+    if (Array.isArray(data.content)) {
+      return data.content
+        .filter((block: any) => block.type === "text")
+        .map((block: any) => block.text)
+        .join("\n");
+    }
+  }
+  if (data.text) return data.text;
+
+  throw new Error("No response from AI");
 }
