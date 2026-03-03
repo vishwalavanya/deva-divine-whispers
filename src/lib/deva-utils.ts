@@ -1,4 +1,4 @@
-import { GODS, LANGS, type LangStrings } from "@/data/constants";
+import { GODS, LANGS } from "@/data/constants";
 
 export function detectGod(text: string): string | null {
   const lower = text.toLowerCase();
