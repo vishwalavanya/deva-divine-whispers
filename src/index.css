@@ -31,6 +31,14 @@
     --divine-glow: 36 100% 70%;
     --panchangam: 263 70% 58%;
     --panchangam-dim: 263 30% 20%;
+    --sidebar-background: 30 10% 6%;
+    --sidebar-foreground: 36 50% 88%;
+    --sidebar-primary: 30 70% 53%;
+    --sidebar-primary-foreground: 0 0% 0%;
+    --sidebar-accent: 30 70% 53%;
+    --sidebar-accent-foreground: 0 0% 0%;
+    --sidebar-border: 30 20% 15%;
+    --sidebar-ring: 30 70% 53%;
   }
 }
 
