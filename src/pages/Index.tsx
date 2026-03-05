@@ -56,6 +56,7 @@ export default function DevaAI() {
   const [showRasiDrop, setShowRasiDrop] = useState(false);
   const [showNakDrop, setShowNakDrop] = useState(false);
   const [panchLoading, setPanchLoading] = useState(false);
+  const [panchLang, setPanchLang] = useState("en");
   const [panchResult, setPanchResult] = useState<string | null>(null);
   const [panchFollowInput, setPanchFollowInput] = useState("");
   const [panchHistory, setPanchHistory] = useState<AIMessage[]>([]);
@@ -194,7 +195,7 @@ IMPORTANT: The user has already confirmed their own Rasi and Nakshatra above. Do
 
 ${PANCHANGAM_PROMPT}`;
     try {
-      const sysPrompt = `You are a master Vedic astrologer (Jyotishi) with expertise in both Tamil Panchangam and North Indian Panchang. You have deep knowledge of 27 Nakshatras, 12 Rasis, Navagrahas, and temple recommendations. Always respond in ${LANGS[lang].label}.`;
+      const sysPrompt = `You are a master Vedic astrologer (Jyotishi) with expertise in both Tamil Panchangam and North Indian Panchang. You have deep knowledge of 27 Nakshatras, 12 Rasis, Navagrahas, and temple recommendations. IMPORTANT: Always respond entirely in ${LANGS[panchLang].label} language.`;
       const reply = await callAnthropicAPI(sysPrompt, [{ role: "user", content: prompt }], 2000);
       setPanchResult(reply);
       setPanchHistory([{ role: "user", content: prompt }, { role: "assistant", content: reply }]);
@@ -220,7 +221,7 @@ ${PANCHANGAM_PROMPT}`;
     setPanchHistory(newHist);
     setLoading(true);
     try {
-      const sysPrompt = `You are a master Vedic astrologer continuing a Panchangam reading session. Respond in ${LANGS[lang].label}. Be specific and reference Jyotisha principles.`;
+      const sysPrompt = `You are a master Vedic astrologer continuing a Panchangam reading session. IMPORTANT: Respond entirely in ${LANGS[panchLang].label} language. Be specific and reference Jyotisha principles.`;
       const reply = await callAnthropicAPI(sysPrompt, newHist, 800);
       setPanchHistory(prev => [...prev, { role: "assistant", content: reply }]);
     } catch {
@@ -524,6 +525,18 @@ ${PANCHANGAM_PROMPT}`;
                       </div>
                     )}
                     {panchForm.nakshatra && <div style={{ color: "#a78bfa", fontSize: "10px", marginTop: "3px" }}>✓ {NAKSHATRA_LIST.find(n => n.en === panchForm.nakshatra)?.ta}</div>}
+                  </div>
+                </div>
+
+                {/* Language Selection */}
+                <div style={{ marginBottom: "14px" }}>
+                  <label style={{ color: "rgba(255,255,255,.45)", fontSize: "11px", display: "block", marginBottom: "7px" }}>🌐 Output Language</label>
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: "8px" }}>
+                    {Object.entries(LANGS).map(([code, l]) => (
+                      <button key={code} className="deva-btn" onClick={() => setPanchLang(code)} style={{ padding: "7px 14px", background: panchLang === code ? "rgba(167,139,250,.25)" : "rgba(255,255,255,.04)", border: `1px solid ${panchLang === code ? "#a78bfa" : "rgba(255,255,255,.1)"}`, borderRadius: "8px", color: panchLang === code ? "#a78bfa" : "rgba(255,255,255,.4)", fontSize: "12px", display: "flex", alignItems: "center", gap: "5px" }}>
+                        {l.flag} {l.label}
+                      </button>
+                    ))}
                   </div>
                 </div>
 
