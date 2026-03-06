@@ -1,8 +1,17 @@
-const API_URL = "https://dev-ai-1.onrender.com";
+const API_URL = "https://dev-ai-u687.onrender.com/api/chat";
 
 export interface AIMessage {
   role: "user" | "assistant";
-  content: string;
+  content: string | AIContentPart[];
+}
+
+export interface AIContentPart {
+  type: "text" | "image" | "document";
+  text?: string;
+  source?: {
+    media_type: string;
+    data: string;
+  };
 }
 
 export async function callAnthropicAPI(
@@ -10,29 +19,33 @@ export async function callAnthropicAPI(
   messages: AIMessage[],
   maxTokens: number = 1500
 ): Promise<string> {
+  const hasImages = messages.some(
+    (m) => Array.isArray(m.content) && m.content.some((p) => p.type === "image" || p.type === "document")
+  );
+
   const response = await fetch(API_URL, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
-      system: systemPrompt,
+      systemPrompt,
       messages,
-      max_tokens: maxTokens,
+      hasImages,
     }),
   });
 
   if (!response.ok) {
-    throw new Error(`Backend error: ${response.status}`);
+    const errText = await response.text();
+    throw new Error(`Backend error: ${response.status} - ${errText}`);
   }
 
   const data = await response.json();
 
-  // Support multiple response formats from the backend
-  if (typeof data === "string") return data;
   if (data.reply) return data.reply;
   if (data.response) return data.response;
-  if (data.message) return data.message;
+  if (data.message && typeof data.message === "string") return data.message;
+  if (typeof data === "string") return data;
   if (data.content) {
     if (typeof data.content === "string") return data.content;
     if (Array.isArray(data.content)) {

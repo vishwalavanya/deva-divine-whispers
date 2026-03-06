@@ -4,7 +4,7 @@ import {
   PANCHANGAM_PROMPT, PARTICLES,
 } from "@/data/constants";
 import { detectGod, fmt, stripHtml, timeAgo, buildSystemPrompt } from "@/lib/deva-utils";
-import { callAnthropicAPI, type AIMessage } from "@/lib/ai-service";
+import { callAnthropicAPI, type AIMessage, type AIContentPart } from "@/lib/ai-service";
 
 interface ChatMessage {
   role: "user" | "assistant";
@@ -35,6 +35,11 @@ interface PanchForm {
 
 let chatIdCounter = 0;
 
+function getTextContent(content: string | AIContentPart[]): string {
+  if (typeof content === "string") return content;
+  return content.filter(p => p.type === "text").map(p => p.text || "").join("\n");
+}
+
 export default function DevaAI() {
   const [lang, setLang] = useState("en");
   const [showLang, setShowLang] = useState(false);
@@ -62,7 +67,16 @@ export default function DevaAI() {
   const [panchHistory, setPanchHistory] = useState<AIMessage[]>([]);
   const [speakingIdx, setSpeakingIdx] = useState<number | null>(null);
 
+  // Panchangam mode: "manual" or "jatakam"
+  const [panchMode, setPanchMode] = useState<"manual" | "jatakam">("manual");
+  // Jatakam upload state
+  const [jatakamName, setJatakamName] = useState("");
+  const [jatakamGender, setJatakamGender] = useState("male");
+  const [jatakamImages, setJatakamImages] = useState<{ data: string; mediaType: string }[]>([]);
+  const [jatakamLang, setJatakamLang] = useState("en");
+
   const endRef = useRef<HTMLDivElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const t = LANGS[lang];
 
   useEffect(() => {
@@ -213,6 +227,75 @@ ${PANCHANGAM_PROMPT}`;
     setPanchLoading(false);
   }
 
+  // Jatakam image upload handler
+  function handleJatakamFiles(e: React.ChangeEvent<HTMLInputElement>) {
+    const files = e.target.files;
+    if (!files) return;
+    const remaining = 4 - jatakamImages.length;
+    const toProcess = Array.from(files).slice(0, remaining);
+    toProcess.forEach(file => {
+      const reader = new FileReader();
+      reader.onload = () => {
+        const result = reader.result as string;
+        const base64 = result.split(",")[1];
+        const mediaType = file.type || "image/jpeg";
+        setJatakamImages(prev => {
+          if (prev.length >= 4) return prev;
+          return [...prev, { data: base64, mediaType }];
+        });
+      };
+      reader.readAsDataURL(file);
+    });
+    e.target.value = "";
+  }
+
+  function removeJatakamImage(idx: number) {
+    setJatakamImages(prev => prev.filter((_, i) => i !== idx));
+  }
+
+  async function runJatakamReading() {
+    if (jatakamImages.length === 0) return;
+    setPanchLoading(true);
+    setPanchResult(null);
+    setPanchHistory([]);
+    try {
+      const sysPrompt = `You are an exceptionally well-versed Hindu Vedic astrologer (Jyotishi) with deep expertise in reading traditional Jatakam (ஜாதகம் / जन्मकुंडली / Birth Chart). You can analyze handwritten and printed Jatakam charts with precision. When the user uploads their Jatakam image(s), you must:
+1. Carefully analyze every detail visible in the Jatakam — Rasi chart, Navamsa chart, planetary positions, Dasha periods, Lagna, house placements, aspects, yogas, and doshas.
+2. Provide a comprehensive and accurate reading covering: personality traits, career, marriage, health, wealth, spiritual path, favorable periods, remedies (mantras, gemstones, temple visits, fasting days).
+3. Be specific — reference exact planetary positions, house lords, and Nakshatra padas as seen in the chart.
+4. If anything is unclear in the image, mention it honestly.
+5. End with personalized remedies and blessings.
+
+IMPORTANT: Always respond entirely in ${LANGS[jatakamLang].label} language.`;
+
+      const contentParts: AIContentPart[] = [
+        { type: "text", text: `My name is ${jatakamName || "Devotee"}. Gender: ${jatakamGender}. I am uploading my Jatakam (birth chart) image(s). Please analyze them thoroughly and give me a complete Vedic astrology reading with remedies, predictions, and guidance.` }
+      ];
+      jatakamImages.forEach(img => {
+        contentParts.push({
+          type: "image",
+          source: { media_type: img.mediaType, data: img.data }
+        });
+      });
+
+      const msgs: AIMessage[] = [{ role: "user", content: contentParts }];
+      const reply = await callAnthropicAPI(sysPrompt, msgs, 3000);
+      setPanchResult(reply);
+      setPanchHistory([{ role: "user", content: `Jatakam reading for ${jatakamName || "Devotee"}` }, { role: "assistant", content: reply }]);
+      const session: ChatSession = {
+        id: ++chatIdCounter, mode: "panchangam", key: "panchangam",
+        entityName: "Jatakam Reading", entityEmoji: "📜",
+        preview: `Jatakam for ${jatakamName || "Devotee"}`,
+        messages: [{ role: "assistant", content: reply }], timestamp: Date.now()
+      };
+      setChatSessions(prev => [session, ...prev.slice(0, 49)]);
+      setActiveChatId(session.id);
+    } catch (err) {
+      setPanchResult("🙏 Connection issue. Please try again.");
+    }
+    setPanchLoading(false);
+  }
+
   async function sendPanchFollow() {
     if (!panchFollowInput.trim() || loading) return;
     const txt = panchFollowInput.trim();
@@ -221,7 +304,8 @@ ${PANCHANGAM_PROMPT}`;
     setPanchHistory(newHist);
     setLoading(true);
     try {
-      const sysPrompt = `You are a master Vedic astrologer continuing a Panchangam reading session. IMPORTANT: Respond entirely in ${LANGS[panchLang].label} language. Be specific and reference Jyotisha principles.`;
+      const usedLang = panchMode === "jatakam" ? jatakamLang : panchLang;
+      const sysPrompt = `You are a master Vedic astrologer continuing a Panchangam reading session. IMPORTANT: Respond entirely in ${LANGS[usedLang].label} language. Be specific and reference Jyotisha principles.`;
       const reply = await callAnthropicAPI(sysPrompt, newHist, 800);
       setPanchHistory(prev => [...prev, { role: "assistant", content: reply }]);
     } catch {
@@ -261,6 +345,13 @@ ${PANCHANGAM_PROMPT}`;
   const bgStyle = phase === "panchangam"
     ? { background: "linear-gradient(135deg,#0a0014,#150028,#0a0014)" }
     : entity ? { background: entity.bg } : { background: "linear-gradient(135deg,#080808,#160e00)" };
+
+  const inputStyle = (highlighted = false) => ({
+    width: "100%", background: highlighted ? "rgba(167,139,250,.18)" : "rgba(255,255,255,.07)",
+    border: `1px solid ${highlighted ? "#a78bfa" : "rgba(167,139,250,.25)"}`,
+    borderRadius: "8px", padding: "9px 12px", color: "#fff", fontSize: "13px",
+    fontFamily: "Georgia,serif", boxSizing: "border-box" as const
+  });
 
   return (
     <div
@@ -446,7 +537,7 @@ ${PANCHANGAM_PROMPT}`;
 
         {/* PANCHANGAM */}
         {phase === "panchangam" && (
-          <div style={{ maxWidth: "680px", width: "100%" }}>
+          <div style={{ maxWidth: "720px", width: "100%" }}>
             <button className="deva-btn" onClick={() => { setPhase("home"); setTab("gods"); setPanchResult(null); setPanchHistory([]); }} style={{ background: "rgba(255,255,255,.07)", border: "1px solid rgba(255,255,255,.12)", borderRadius: "8px", color: "rgba(255,255,255,.5)", padding: "5px 12px", fontSize: "12px", marginBottom: "16px" }}>← Back</button>
             <div style={{ textAlign: "center", marginBottom: "20px" }}>
               <div className="animate-divine-pulse" style={{ fontSize: "44px", marginBottom: "8px" }}>🔯</div>
@@ -455,135 +546,242 @@ ${PANCHANGAM_PROMPT}`;
             </div>
 
             {!panchResult && !panchLoading && (
-              <div style={{ background: "rgba(167,139,250,.06)", border: "1px solid rgba(167,139,250,.2)", borderRadius: "18px", padding: "22px" }}>
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "12px", marginBottom: "12px" }}>
-                  <div>
-                    <label style={{ color: "rgba(255,255,255,.45)", fontSize: "11px", display: "block", marginBottom: "5px" }}>{t.panchName}</label>
-                    <input value={panchForm.name} onChange={e => setPanchForm({ ...panchForm, name: e.target.value })} placeholder="e.g. Arjun Kumar" style={{ width: "100%", background: "rgba(255,255,255,.07)", border: "1px solid rgba(167,139,250,.25)", borderRadius: "8px", padding: "9px 12px", color: "#fff", fontSize: "13px", fontFamily: "Georgia,serif", boxSizing: "border-box" }} />
-                  </div>
-                  <div>
-                    <label style={{ color: "rgba(255,255,255,.45)", fontSize: "11px", display: "block", marginBottom: "5px" }}>{t.panchDob} *</label>
-                    <input type="date" value={panchForm.dob} onChange={e => setPanchForm({ ...panchForm, dob: e.target.value })} style={{ width: "100%", background: "rgba(255,255,255,.07)", border: "1px solid rgba(167,139,250,.25)", borderRadius: "8px", padding: "9px 12px", color: "#fff", fontSize: "13px", fontFamily: "Georgia,serif", boxSizing: "border-box" }} />
-                  </div>
-                  <div>
-                    <label style={{ color: "rgba(255,255,255,.45)", fontSize: "11px", display: "block", marginBottom: "5px" }}>{t.panchTime}</label>
-                    <input type="time" value={panchForm.time} onChange={e => setPanchForm({ ...panchForm, time: e.target.value })} style={{ width: "100%", background: "rgba(255,255,255,.07)", border: "1px solid rgba(167,139,250,.25)", borderRadius: "8px", padding: "9px 12px", color: "#fff", fontSize: "13px", fontFamily: "Georgia,serif", boxSizing: "border-box" }} />
-                  </div>
-                  <div>
-                    <label style={{ color: "rgba(255,255,255,.45)", fontSize: "11px", display: "block", marginBottom: "5px" }}>{t.panchPlace}</label>
-                    <input value={panchForm.place} onChange={e => setPanchForm({ ...panchForm, place: e.target.value })} placeholder="e.g. Chennai, Tamil Nadu" style={{ width: "100%", background: "rgba(255,255,255,.07)", border: "1px solid rgba(167,139,250,.25)", borderRadius: "8px", padding: "9px 12px", color: "#fff", fontSize: "13px", fontFamily: "Georgia,serif", boxSizing: "border-box" }} />
-                  </div>
+              <>
+                {/* Two Column Selector */}
+                <div style={{ display: "flex", gap: "10px", marginBottom: "18px" }}>
+                  <button className="deva-btn" onClick={() => setPanchMode("manual")} style={{
+                    flex: 1, padding: "14px 12px", background: panchMode === "manual" ? "rgba(167,139,250,.2)" : "rgba(255,255,255,.04)",
+                    border: `1px solid ${panchMode === "manual" ? "#a78bfa" : "rgba(255,255,255,.1)"}`, borderRadius: "14px",
+                    color: panchMode === "manual" ? "#a78bfa" : "rgba(255,255,255,.4)", textAlign: "center"
+                  }}>
+                    <div style={{ fontSize: "28px", marginBottom: "6px" }}>📝</div>
+                    <div style={{ fontSize: "13px", fontWeight: "bold" }}>Enter Details Manually</div>
+                    <div style={{ fontSize: "10px", marginTop: "4px", opacity: 0.6 }}>Name, DOB, Rasi, Nakshatra...</div>
+                  </button>
+                  <button className="deva-btn" onClick={() => setPanchMode("jatakam")} style={{
+                    flex: 1, padding: "14px 12px", background: panchMode === "jatakam" ? "rgba(167,139,250,.2)" : "rgba(255,255,255,.04)",
+                    border: `1px solid ${panchMode === "jatakam" ? "#a78bfa" : "rgba(255,255,255,.1)"}`, borderRadius: "14px",
+                    color: panchMode === "jatakam" ? "#a78bfa" : "rgba(255,255,255,.4)", textAlign: "center"
+                  }}>
+                    <div style={{ fontSize: "28px", marginBottom: "6px" }}>📜</div>
+                    <div style={{ fontSize: "13px", fontWeight: "bold" }}>Upload Jatakam</div>
+                    <div style={{ fontSize: "10px", marginTop: "4px", opacity: 0.6 }}>Upload your birth chart images</div>
+                  </button>
                 </div>
 
-                {/* Rasi + Nakshatra */}
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "12px", marginBottom: "12px" }}>
-                  <div style={{ position: "relative" }} onClick={e => e.stopPropagation()}>
-                    <label style={{ color: "rgba(255,255,255,.45)", fontSize: "11px", display: "block", marginBottom: "5px" }}>♈ Rasi (Moon Sign) *</label>
-                    <input
-                      value={panchForm.rasi || rasiQuery}
-                      onChange={e => { setRasiQuery(e.target.value); setPanchForm({ ...panchForm, rasi: "" }); setShowRasiDrop(true); }}
-                      onFocus={() => setShowRasiDrop(true)}
-                      placeholder="Type e.g. Rishabha..."
-                      style={{ width: "100%", background: panchForm.rasi ? "rgba(167,139,250,.18)" : "rgba(255,255,255,.07)", border: `1px solid ${panchForm.rasi ? "#a78bfa" : "rgba(167,139,250,.25)"}`, borderRadius: "8px", padding: "9px 12px", color: "#fff", fontSize: "13px", fontFamily: "Georgia,serif", boxSizing: "border-box" }}
-                    />
-                    {showRasiDrop && (
-                      <div style={{ position: "absolute", top: "100%", left: 0, right: 0, background: "#1a1020", border: "1px solid rgba(167,139,250,.3)", borderRadius: "8px", zIndex: 400, maxHeight: "180px", overflowY: "auto", boxShadow: "0 8px 24px rgba(0,0,0,.8)" }}>
-                        {RASI_LIST.filter(r => !rasiQuery || r.en.toLowerCase().includes(rasiQuery.toLowerCase()) || r.ta.includes(rasiQuery)).map(r => (
-                          <button key={r.num} className="deva-btn" onClick={() => { setPanchForm({ ...panchForm, rasi: r.en }); setRasiQuery(""); setShowRasiDrop(false); }} style={{ width: "100%", padding: "9px 12px", background: "transparent", border: "none", borderBottom: "1px solid rgba(167,139,250,.1)", color: "#e8d5ff", textAlign: "left", fontSize: "12px", display: "flex", alignItems: "center", gap: "8px" }}>
-                            <span style={{ fontSize: "16px" }}>{r.symbol}</span>
-                            <div>
-                              <div style={{ fontWeight: "bold" }}>{r.en}</div>
-                              <div style={{ color: "rgba(255,255,255,.4)", fontSize: "10px" }}>{r.ta} • Lord: {r.planet}</div>
-                            </div>
+                {/* COLUMN 1: Manual Entry */}
+                {panchMode === "manual" && (
+                  <div style={{ background: "rgba(167,139,250,.06)", border: "1px solid rgba(167,139,250,.2)", borderRadius: "18px", padding: "22px" }}>
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "12px", marginBottom: "12px" }}>
+                      <div>
+                        <label style={{ color: "rgba(255,255,255,.45)", fontSize: "11px", display: "block", marginBottom: "5px" }}>{t.panchName}</label>
+                        <input value={panchForm.name} onChange={e => setPanchForm({ ...panchForm, name: e.target.value })} placeholder="e.g. Arjun Kumar" style={inputStyle()} />
+                      </div>
+                      <div>
+                        <label style={{ color: "rgba(255,255,255,.45)", fontSize: "11px", display: "block", marginBottom: "5px" }}>{t.panchDob} *</label>
+                        <input type="date" value={panchForm.dob} onChange={e => setPanchForm({ ...panchForm, dob: e.target.value })} style={inputStyle()} />
+                      </div>
+                      <div>
+                        <label style={{ color: "rgba(255,255,255,.45)", fontSize: "11px", display: "block", marginBottom: "5px" }}>{t.panchTime}</label>
+                        <input type="time" value={panchForm.time} onChange={e => setPanchForm({ ...panchForm, time: e.target.value })} style={inputStyle()} />
+                      </div>
+                      <div>
+                        <label style={{ color: "rgba(255,255,255,.45)", fontSize: "11px", display: "block", marginBottom: "5px" }}>{t.panchPlace}</label>
+                        <input value={panchForm.place} onChange={e => setPanchForm({ ...panchForm, place: e.target.value })} placeholder="e.g. Chennai, Tamil Nadu" style={inputStyle()} />
+                      </div>
+                    </div>
+
+                    {/* Rasi + Nakshatra */}
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "12px", marginBottom: "12px" }}>
+                      <div style={{ position: "relative" }} onClick={e => e.stopPropagation()}>
+                        <label style={{ color: "rgba(255,255,255,.45)", fontSize: "11px", display: "block", marginBottom: "5px" }}>♈ Rasi (Moon Sign) *</label>
+                        <input
+                          value={panchForm.rasi || rasiQuery}
+                          onChange={e => { setRasiQuery(e.target.value); setPanchForm({ ...panchForm, rasi: "" }); setShowRasiDrop(true); }}
+                          onFocus={() => setShowRasiDrop(true)}
+                          placeholder="Type e.g. Rishabha..."
+                          style={inputStyle(!!panchForm.rasi)}
+                        />
+                        {showRasiDrop && (
+                          <div style={{ position: "absolute", top: "100%", left: 0, right: 0, background: "#1a1020", border: "1px solid rgba(167,139,250,.3)", borderRadius: "8px", zIndex: 400, maxHeight: "180px", overflowY: "auto", boxShadow: "0 8px 24px rgba(0,0,0,.8)" }}>
+                            {RASI_LIST.filter(r => !rasiQuery || r.en.toLowerCase().includes(rasiQuery.toLowerCase()) || r.ta.includes(rasiQuery)).map(r => (
+                              <button key={r.num} className="deva-btn" onClick={() => { setPanchForm({ ...panchForm, rasi: r.en }); setRasiQuery(""); setShowRasiDrop(false); }} style={{ width: "100%", padding: "9px 12px", background: "transparent", border: "none", borderBottom: "1px solid rgba(167,139,250,.1)", color: "#e8d5ff", textAlign: "left", fontSize: "12px", display: "flex", alignItems: "center", gap: "8px" }}>
+                                <span style={{ fontSize: "16px" }}>{r.symbol}</span>
+                                <div>
+                                  <div style={{ fontWeight: "bold" }}>{r.en}</div>
+                                  <div style={{ color: "rgba(255,255,255,.4)", fontSize: "10px" }}>{r.ta} • Lord: {r.planet}</div>
+                                </div>
+                              </button>
+                            ))}
+                          </div>
+                        )}
+                        {panchForm.rasi && <div style={{ color: "#a78bfa", fontSize: "10px", marginTop: "3px" }}>✓ {RASI_LIST.find(r => r.en === panchForm.rasi)?.ta}</div>}
+                      </div>
+
+                      <div style={{ position: "relative" }} onClick={e => e.stopPropagation()}>
+                        <label style={{ color: "rgba(255,255,255,.45)", fontSize: "11px", display: "block", marginBottom: "5px" }}>⭐ Nakshatra (Birth Star) *</label>
+                        <input
+                          value={panchForm.nakshatra || nakQuery}
+                          onChange={e => { setNakQuery(e.target.value); setPanchForm({ ...panchForm, nakshatra: "" }); setShowNakDrop(true); }}
+                          onFocus={() => setShowNakDrop(true)}
+                          placeholder="Type e.g. Rohini..."
+                          style={inputStyle(!!panchForm.nakshatra)}
+                        />
+                        {showNakDrop && (
+                          <div style={{ position: "absolute", top: "100%", left: 0, right: 0, background: "#1a1020", border: "1px solid rgba(167,139,250,.3)", borderRadius: "8px", zIndex: 400, maxHeight: "180px", overflowY: "auto", boxShadow: "0 8px 24px rgba(0,0,0,.8)" }}>
+                            {NAKSHATRA_LIST.filter(n => !nakQuery || n.en.toLowerCase().includes(nakQuery.toLowerCase()) || n.ta.includes(nakQuery)).map(n => (
+                              <button key={n.num} className="deva-btn" onClick={() => { setPanchForm({ ...panchForm, nakshatra: n.en }); setNakQuery(""); setShowNakDrop(false); }} style={{ width: "100%", padding: "9px 12px", background: "transparent", border: "none", borderBottom: "1px solid rgba(167,139,250,.1)", color: "#e8d5ff", textAlign: "left", fontSize: "12px", display: "flex", alignItems: "center", gap: "8px" }}>
+                                <span style={{ color: "#f9c74f", fontSize: "13px" }}>⭐</span>
+                                <div>
+                                  <div style={{ fontWeight: "bold" }}>{n.en}</div>
+                                  <div style={{ color: "rgba(255,255,255,.4)", fontSize: "10px" }}>{n.ta} • {n.deity} • {n.planet}</div>
+                                </div>
+                              </button>
+                            ))}
+                          </div>
+                        )}
+                        {panchForm.nakshatra && <div style={{ color: "#a78bfa", fontSize: "10px", marginTop: "3px" }}>✓ {NAKSHATRA_LIST.find(n => n.en === panchForm.nakshatra)?.ta}</div>}
+                      </div>
+                    </div>
+
+                    {/* Language Selection */}
+                    <div style={{ marginBottom: "14px" }}>
+                      <label style={{ color: "rgba(255,255,255,.45)", fontSize: "11px", display: "block", marginBottom: "7px" }}>🌐 Output Language</label>
+                      <div style={{ display: "flex", flexWrap: "wrap", gap: "8px" }}>
+                        {Object.entries(LANGS).map(([code, l]) => (
+                          <button key={code} className="deva-btn" onClick={() => setPanchLang(code)} style={{ padding: "7px 14px", background: panchLang === code ? "rgba(167,139,250,.25)" : "rgba(255,255,255,.04)", border: `1px solid ${panchLang === code ? "#a78bfa" : "rgba(255,255,255,.1)"}`, borderRadius: "8px", color: panchLang === code ? "#a78bfa" : "rgba(255,255,255,.4)", fontSize: "12px", display: "flex", alignItems: "center", gap: "5px" }}>
+                            {l.flag} {l.label}
                           </button>
                         ))}
                       </div>
-                    )}
-                    {panchForm.rasi && <div style={{ color: "#a78bfa", fontSize: "10px", marginTop: "3px" }}>✓ {RASI_LIST.find(r => r.en === panchForm.rasi)?.ta}</div>}
-                  </div>
+                    </div>
 
-                  <div style={{ position: "relative" }} onClick={e => e.stopPropagation()}>
-                    <label style={{ color: "rgba(255,255,255,.45)", fontSize: "11px", display: "block", marginBottom: "5px" }}>⭐ Nakshatra (Birth Star) *</label>
-                    <input
-                      value={panchForm.nakshatra || nakQuery}
-                      onChange={e => { setNakQuery(e.target.value); setPanchForm({ ...panchForm, nakshatra: "" }); setShowNakDrop(true); }}
-                      onFocus={() => setShowNakDrop(true)}
-                      placeholder="Type e.g. Rohini..."
-                      style={{ width: "100%", background: panchForm.nakshatra ? "rgba(167,139,250,.18)" : "rgba(255,255,255,.07)", border: `1px solid ${panchForm.nakshatra ? "#a78bfa" : "rgba(167,139,250,.25)"}`, borderRadius: "8px", padding: "9px 12px", color: "#fff", fontSize: "13px", fontFamily: "Georgia,serif", boxSizing: "border-box" }}
-                    />
-                    {showNakDrop && (
-                      <div style={{ position: "absolute", top: "100%", left: 0, right: 0, background: "#1a1020", border: "1px solid rgba(167,139,250,.3)", borderRadius: "8px", zIndex: 400, maxHeight: "180px", overflowY: "auto", boxShadow: "0 8px 24px rgba(0,0,0,.8)" }}>
-                        {NAKSHATRA_LIST.filter(n => !nakQuery || n.en.toLowerCase().includes(nakQuery.toLowerCase()) || n.ta.includes(nakQuery)).map(n => (
-                          <button key={n.num} className="deva-btn" onClick={() => { setPanchForm({ ...panchForm, nakshatra: n.en }); setNakQuery(""); setShowNakDrop(false); }} style={{ width: "100%", padding: "9px 12px", background: "transparent", border: "none", borderBottom: "1px solid rgba(167,139,250,.1)", color: "#e8d5ff", textAlign: "left", fontSize: "12px", display: "flex", alignItems: "center", gap: "8px" }}>
-                            <span style={{ color: "#f9c74f", fontSize: "13px" }}>⭐</span>
-                            <div>
-                              <div style={{ fontWeight: "bold" }}>{n.en}</div>
-                              <div style={{ color: "rgba(255,255,255,.4)", fontSize: "10px" }}>{n.ta} • {n.deity} • {n.planet}</div>
-                            </div>
+                    <div style={{ marginBottom: "14px" }}>
+                      <label style={{ color: "rgba(255,255,255,.45)", fontSize: "11px", display: "block", marginBottom: "7px" }}>{t.panchGender}</label>
+                      <div style={{ display: "flex", gap: "10px" }}>
+                        {(["male", "female"] as const).map(g => (
+                          <button key={g} className="deva-btn" onClick={() => setPanchForm({ ...panchForm, gender: g })} style={{ flex: 1, padding: "8px", background: panchForm.gender === g ? "rgba(167,139,250,.2)" : "rgba(255,255,255,.04)", border: `1px solid ${panchForm.gender === g ? "#a78bfa" : "rgba(255,255,255,.1)"}`, borderRadius: "8px", color: panchForm.gender === g ? "#a78bfa" : "rgba(255,255,255,.4)", fontSize: "13px" }}>
+                            {g === "male" ? `♂ ${t.panchMale}` : `♀ ${t.panchFemale}`}
                           </button>
                         ))}
                       </div>
-                    )}
-                    {panchForm.nakshatra && <div style={{ color: "#a78bfa", fontSize: "10px", marginTop: "3px" }}>✓ {NAKSHATRA_LIST.find(n => n.en === panchForm.nakshatra)?.ta}</div>}
+                    </div>
+                    <button className="deva-btn" onClick={runPanchangam} disabled={!panchForm.dob || !panchForm.rasi || !panchForm.nakshatra} style={{ width: "100%", padding: "13px", background: "linear-gradient(135deg,#7c3aed,#a78bfa)", border: "none", borderRadius: "10px", color: "#fff", fontSize: "14px", fontWeight: "bold", letterSpacing: "1px", opacity: (panchForm.dob && panchForm.rasi && panchForm.nakshatra) ? 1 : 0.5 }}>{t.panchBtn}</button>
                   </div>
-                </div>
+                )}
 
-                {/* Language Selection */}
-                <div style={{ marginBottom: "14px" }}>
-                  <label style={{ color: "rgba(255,255,255,.45)", fontSize: "11px", display: "block", marginBottom: "7px" }}>🌐 Output Language</label>
-                  <div style={{ display: "flex", flexWrap: "wrap", gap: "8px" }}>
-                    {Object.entries(LANGS).map(([code, l]) => (
-                      <button key={code} className="deva-btn" onClick={() => setPanchLang(code)} style={{ padding: "7px 14px", background: panchLang === code ? "rgba(167,139,250,.25)" : "rgba(255,255,255,.04)", border: `1px solid ${panchLang === code ? "#a78bfa" : "rgba(255,255,255,.1)"}`, borderRadius: "8px", color: panchLang === code ? "#a78bfa" : "rgba(255,255,255,.4)", fontSize: "12px", display: "flex", alignItems: "center", gap: "5px" }}>
-                        {l.flag} {l.label}
-                      </button>
-                    ))}
-                  </div>
-                </div>
+                {/* COLUMN 2: Jatakam Upload */}
+                {panchMode === "jatakam" && (
+                  <div style={{ background: "rgba(167,139,250,.06)", border: "1px solid rgba(167,139,250,.2)", borderRadius: "18px", padding: "22px" }}>
+                    <div style={{ textAlign: "center", marginBottom: "16px" }}>
+                      <div style={{ fontSize: "18px", marginBottom: "4px" }}>📜</div>
+                      <div style={{ color: "#a78bfa", fontSize: "14px", fontWeight: "bold" }}>Upload Your Jatakam (ஜாதகம்)</div>
+                      <div style={{ color: "rgba(255,255,255,.35)", fontSize: "11px", marginTop: "4px" }}>Upload your birth chart images for AI analysis</div>
+                    </div>
 
-                <div style={{ marginBottom: "14px" }}>
-                  <label style={{ color: "rgba(255,255,255,.45)", fontSize: "11px", display: "block", marginBottom: "7px" }}>{t.panchGender}</label>
-                  <div style={{ display: "flex", gap: "10px" }}>
-                    {(["male", "female"] as const).map(g => (
-                      <button key={g} className="deva-btn" onClick={() => setPanchForm({ ...panchForm, gender: g })} style={{ flex: 1, padding: "8px", background: panchForm.gender === g ? "rgba(167,139,250,.2)" : "rgba(255,255,255,.04)", border: `1px solid ${panchForm.gender === g ? "#a78bfa" : "rgba(255,255,255,.1)"}`, borderRadius: "8px", color: panchForm.gender === g ? "#a78bfa" : "rgba(255,255,255,.4)", fontSize: "13px" }}>
-                        {g === "male" ? `♂ ${t.panchMale}` : `♀ ${t.panchFemale}`}
-                      </button>
-                    ))}
+                    {/* Name */}
+                    <div style={{ marginBottom: "12px" }}>
+                      <label style={{ color: "rgba(255,255,255,.45)", fontSize: "11px", display: "block", marginBottom: "5px" }}>{t.panchName}</label>
+                      <input value={jatakamName} onChange={e => setJatakamName(e.target.value)} placeholder="e.g. Arjun Kumar" style={inputStyle()} />
+                    </div>
+
+                    {/* Image Upload */}
+                    <div style={{ marginBottom: "14px" }}>
+                      <label style={{ color: "rgba(255,255,255,.45)", fontSize: "11px", display: "block", marginBottom: "7px" }}>📷 Upload Jatakam Images (max 4)</label>
+                      <input
+                        ref={fileInputRef}
+                        type="file"
+                        accept="image/*"
+                        multiple
+                        onChange={handleJatakamFiles}
+                        style={{ display: "none" }}
+                      />
+                      <div style={{ display: "flex", gap: "10px", flexWrap: "wrap", marginBottom: "10px" }}>
+                        {jatakamImages.map((img, idx) => (
+                          <div key={idx} style={{ position: "relative", width: "80px", height: "80px", borderRadius: "10px", overflow: "hidden", border: "1px solid rgba(167,139,250,.4)" }}>
+                            <img src={`data:${img.mediaType};base64,${img.data}`} alt={`Jatakam ${idx + 1}`} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+                            <button className="deva-btn" onClick={() => removeJatakamImage(idx)} style={{ position: "absolute", top: "2px", right: "2px", width: "20px", height: "20px", borderRadius: "50%", background: "rgba(220,50,50,.85)", border: "none", color: "#fff", fontSize: "11px", display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer" }}>✕</button>
+                          </div>
+                        ))}
+                        {jatakamImages.length < 4 && (
+                          <button className="deva-btn" onClick={() => fileInputRef.current?.click()} style={{ width: "80px", height: "80px", borderRadius: "10px", background: "rgba(167,139,250,.1)", border: "2px dashed rgba(167,139,250,.35)", color: "#a78bfa", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: "4px", cursor: "pointer" }}>
+                            <span style={{ fontSize: "22px" }}>+</span>
+                            <span style={{ fontSize: "9px" }}>Add</span>
+                          </button>
+                        )}
+                      </div>
+                      <div style={{ color: "rgba(255,255,255,.25)", fontSize: "10px" }}>
+                        {jatakamImages.length}/4 images uploaded • Supports JPG, PNG, WEBP
+                      </div>
+                    </div>
+
+                    {/* Gender */}
+                    <div style={{ marginBottom: "14px" }}>
+                      <label style={{ color: "rgba(255,255,255,.45)", fontSize: "11px", display: "block", marginBottom: "7px" }}>{t.panchGender}</label>
+                      <div style={{ display: "flex", gap: "10px" }}>
+                        {(["male", "female"] as const).map(g => (
+                          <button key={g} className="deva-btn" onClick={() => setJatakamGender(g)} style={{ flex: 1, padding: "8px", background: jatakamGender === g ? "rgba(167,139,250,.2)" : "rgba(255,255,255,.04)", border: `1px solid ${jatakamGender === g ? "#a78bfa" : "rgba(255,255,255,.1)"}`, borderRadius: "8px", color: jatakamGender === g ? "#a78bfa" : "rgba(255,255,255,.4)", fontSize: "13px" }}>
+                            {g === "male" ? `♂ ${t.panchMale}` : `♀ ${t.panchFemale}`}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+
+                    {/* Language Selection */}
+                    <div style={{ marginBottom: "14px" }}>
+                      <label style={{ color: "rgba(255,255,255,.45)", fontSize: "11px", display: "block", marginBottom: "7px" }}>🌐 Output Language</label>
+                      <div style={{ display: "flex", flexWrap: "wrap", gap: "8px" }}>
+                        {Object.entries(LANGS).map(([code, l]) => (
+                          <button key={code} className="deva-btn" onClick={() => setJatakamLang(code)} style={{ padding: "7px 14px", background: jatakamLang === code ? "rgba(167,139,250,.25)" : "rgba(255,255,255,.04)", border: `1px solid ${jatakamLang === code ? "#a78bfa" : "rgba(255,255,255,.1)"}`, borderRadius: "8px", color: jatakamLang === code ? "#a78bfa" : "rgba(255,255,255,.4)", fontSize: "12px", display: "flex", alignItems: "center", gap: "5px" }}>
+                            {l.flag} {l.label}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+
+                    <button className="deva-btn" onClick={runJatakamReading} disabled={jatakamImages.length === 0} style={{ width: "100%", padding: "13px", background: "linear-gradient(135deg,#7c3aed,#a78bfa)", border: "none", borderRadius: "10px", color: "#fff", fontSize: "14px", fontWeight: "bold", letterSpacing: "1px", opacity: jatakamImages.length > 0 ? 1 : 0.5 }}>📜 Analyze My Jatakam</button>
                   </div>
-                </div>
-                <button className="deva-btn" onClick={runPanchangam} disabled={!panchForm.dob || !panchForm.rasi || !panchForm.nakshatra} style={{ width: "100%", padding: "13px", background: "linear-gradient(135deg,#7c3aed,#a78bfa)", border: "none", borderRadius: "10px", color: "#fff", fontSize: "14px", fontWeight: "bold", letterSpacing: "1px", opacity: (panchForm.dob && panchForm.rasi && panchForm.nakshatra) ? 1 : 0.5 }}>{t.panchBtn}</button>
-              </div>
+                )}
+              </>
             )}
 
             {panchLoading && (
               <div className="animate-fade-up" style={{ background: "rgba(167,139,250,.07)", border: "1px solid rgba(167,139,250,.2)", borderRadius: "16px", padding: "32px", textAlign: "center" }}>
                 <div className="animate-spin-slow" style={{ fontSize: "36px", marginBottom: "12px" }}>☸️</div>
-                <div style={{ color: "#a78bfa", fontSize: "14px", marginBottom: "6px" }}>Consulting the celestial charts...</div>
-                <div style={{ color: "rgba(255,255,255,.3)", fontSize: "12px" }}>Calculating your Rasi, Nakshatra & cosmic blueprint</div>
+                <div style={{ color: "#a78bfa", fontSize: "14px", marginBottom: "6px" }}>
+                  {panchMode === "jatakam" ? "Analyzing your Jatakam images..." : "Consulting the celestial charts..."}
+                </div>
+                <div style={{ color: "rgba(255,255,255,.3)", fontSize: "12px" }}>
+                  {panchMode === "jatakam" ? "Reading planetary positions from your birth chart" : "Calculating your Rasi, Nakshatra & cosmic blueprint"}
+                </div>
               </div>
             )}
 
             {panchResult && !panchLoading && (
               <div>
-                <button className="deva-btn" onClick={() => { setPanchResult(null); setPanchHistory([]); setPanchForm({ name: "", dob: "", time: "", place: "", gender: "male", rasi: "", nakshatra: "" }); }} style={{ background: "rgba(167,139,250,.12)", border: "1px solid rgba(167,139,250,.3)", borderRadius: "8px", color: "#a78bfa", padding: "5px 14px", fontSize: "12px", marginBottom: "12px" }}>🔄 New Reading</button>
+                <button className="deva-btn" onClick={() => { setPanchResult(null); setPanchHistory([]); setPanchForm({ name: "", dob: "", time: "", place: "", gender: "male", rasi: "", nakshatra: "" }); setJatakamImages([]); setJatakamName(""); }} style={{ background: "rgba(167,139,250,.12)", border: "1px solid rgba(167,139,250,.3)", borderRadius: "8px", color: "#a78bfa", padding: "5px 14px", fontSize: "12px", marginBottom: "12px" }}>🔄 New Reading</button>
                 <div style={{ background: "rgba(0,0,0,.4)", border: "1px solid rgba(167,139,250,.25)", borderRadius: "16px", padding: "20px", marginBottom: "14px", maxHeight: "420px", overflowY: "auto" }}>
                   <div style={{ color: "#e8d5ff", fontSize: "13px", lineHeight: "1.8" }} dangerouslySetInnerHTML={{ __html: fmt(panchResult) }} />
                 </div>
 
                 {panchHistory.length > 2 && (
                   <div style={{ marginBottom: "14px", display: "flex", flexDirection: "column", gap: "10px" }}>
-                    {panchHistory.slice(2).map((m, i) => (
-                      <div key={i} className="animate-fade-up" style={{ display: "flex", justifyContent: m.role === "user" ? "flex-end" : "flex-start" }}>
-                        {m.role === "assistant" && <div style={{ width: "28px", height: "28px", borderRadius: "50%", background: "rgba(167,139,250,.2)", border: "1px solid rgba(167,139,250,.4)", display: "flex", alignItems: "center", justifyContent: "center", marginRight: "8px", flexShrink: 0, fontSize: "13px" }}>🔯</div>}
-                        <div style={{ maxWidth: "80%", position: "relative" }}>
-                          <div style={{ padding: "10px 14px", borderRadius: m.role === "user" ? "14px 14px 4px 14px" : "14px 14px 14px 4px", background: m.role === "user" ? "rgba(167,139,250,.15)" : "rgba(0,0,0,.4)", border: `1px solid rgba(167,139,250,${m.role === "user" ? ".35" : ".18"})`, color: "#e8d5ff", fontSize: "13px", lineHeight: "1.7" }} dangerouslySetInnerHTML={{ __html: fmt(m.content) }} />
-                          {m.role === "assistant" && (
-                            <button className="deva-btn" onClick={() => speak(m.content, 9000 + i)} style={{ position: "absolute", bottom: "-12px", right: "6px", width: "26px", height: "26px", borderRadius: "50%", background: speakingIdx === (9000 + i) ? "#a78bfa" : "rgba(0,0,0,.6)", border: "1px solid rgba(167,139,250,.5)", color: speakingIdx === (9000 + i) ? "#000" : "#fff", fontSize: "12px", display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", zIndex: 10 }}>
-                              {speakingIdx === (9000 + i) ? "⏹" : "🔊"}
-                            </button>
-                          )}
+                    {panchHistory.slice(2).map((m, i) => {
+                      const textContent = getTextContent(m.content);
+                      return (
+                        <div key={i} className="animate-fade-up" style={{ display: "flex", justifyContent: m.role === "user" ? "flex-end" : "flex-start" }}>
+                          {m.role === "assistant" && <div style={{ width: "28px", height: "28px", borderRadius: "50%", background: "rgba(167,139,250,.2)", border: "1px solid rgba(167,139,250,.4)", display: "flex", alignItems: "center", justifyContent: "center", marginRight: "8px", flexShrink: 0, fontSize: "13px" }}>🔯</div>}
+                          <div style={{ maxWidth: "80%", position: "relative" }}>
+                            <div style={{ padding: "10px 14px", borderRadius: m.role === "user" ? "14px 14px 4px 14px" : "14px 14px 14px 4px", background: m.role === "user" ? "rgba(167,139,250,.15)" : "rgba(0,0,0,.4)", border: `1px solid rgba(167,139,250,${m.role === "user" ? ".35" : ".18"})`, color: "#e8d5ff", fontSize: "13px", lineHeight: "1.7" }} dangerouslySetInnerHTML={{ __html: fmt(textContent) }} />
+                            {m.role === "assistant" && (
+                              <button className="deva-btn" onClick={() => speak(textContent, 9000 + i)} style={{ position: "absolute", bottom: "-12px", right: "6px", width: "26px", height: "26px", borderRadius: "50%", background: speakingIdx === (9000 + i) ? "#a78bfa" : "rgba(0,0,0,.6)", border: "1px solid rgba(167,139,250,.5)", color: speakingIdx === (9000 + i) ? "#000" : "#fff", fontSize: "12px", display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", zIndex: 10 }}>
+                                {speakingIdx === (9000 + i) ? "⏹" : "🔊"}
+                              </button>
+                            )}
+                          </div>
                         </div>
-                      </div>
-                    ))}
+                      );
+                    })}
                     {loading && <div style={{ display: "flex", gap: "5px", paddingLeft: "36px" }}>{[0, 1, 2].map(d => <div key={d} style={{ width: "6px", height: "6px", borderRadius: "50%", background: "#a78bfa", opacity: .65, animation: `dot-pulse .85s ${d * .22}s ease-in-out infinite alternate` }} />)}</div>}
                   </div>
                 )}
